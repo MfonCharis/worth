@@ -1,0 +1,93 @@
+pipeline {
+  agent any
+  
+  environment {
+    AWS_ACCESS_KEY_ID = credentials('aws-access-key-id')
+    AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+    AWS_DEFAULT_REGION = 'us-west-2'
+  }
+  
+  stages {
+    stage('Checkout') {
+      steps {
+        git branch: 'main',
+            credentialsId: 'github-credentials',
+            url: 'https://github.com/your/repo.git'
+      }
+    }
+    
+    stage('Build Artifact') {
+      steps {
+        sh 'npm install'
+        sh 'npm run build'
+      }
+    }
+    
+    stage('Terraform Init') {
+      steps {
+        terraformInit(
+            backendS3: true,
+            backendS3Bucket: 'my-terraform-state-bucket',
+            backendS3Key: 'webapp/terraform.tfstate',
+            backendS3Region: 'us-west-2',
+            workingDirectory: 'terraform'
+        )
+      }
+    }
+    
+    stage('Terraform Plan') {
+      steps {
+        terraformPlan(
+            vars: [
+                'aws_region=us-west-2',
+                'db_username=myuser',
+                'db_password=mypassword',
+                'db_name=mydatabase',
+                'allowed_ips=["0.0.0.0/0"]'
+            ],
+            workingDirectory: 'terraform'
+        )
+      }
+    }
+    
+    stage('Terraform Apply') {
+      steps {
+        terraformApply(
+            autoApprove: true,
+            vars: [
+                'aws_region=us-west-2',
+                'db_username=myuser',
+                'db_password=mypassword',
+                'db_name=mydatabase',
+                'allowed_ips=["0.0.0.0/0"]'
+            ],
+            workingDirectory: 'terraform'
+        )
+      }
+    }
+    
+    stage('Build Docker Image') {
+      steps {
+        script {
+          def dockerImage = docker.build("my-image:${env.BUILD_ID}")
+          docker.withRegistry('https://registry.hub.docker.com', 'dockerhub-credentials') {
+            dockerImage.push()
+          }
+        }
+      }
+    }
+    
+    stage('Deploy') {
+      steps {
+        sshagent(['ssh-credentials']) {
+          sh '''
+          ssh user@webserver "docker pull my-image:${env.BUILD_ID}"
+          ssh user@webserver "docker stop webapp || true && docker rm webapp || true"
+          ssh user@webserver "docker run -d --name webapp -p 80:80 my-image:${env.BUILD_ID}"
+          '''
+        }
+      }
+    }
+  }
+}
+
